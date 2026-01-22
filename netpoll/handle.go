@@ -15,12 +15,13 @@ type filer interface {
 // It's methods are not goroutine safe.
 type Desc struct {
 	file  *os.File
+	fd    int
 	event Event
 }
 
 // NewDesc creates descriptor from custom fd.
 func NewDesc(fd uintptr, ev Event) *Desc {
-	return &Desc{os.NewFile(fd, ""), ev}
+	return &Desc{os.NewFile(fd, ""), int(fd), ev}
 }
 
 // Close closes underlying file.
@@ -28,8 +29,8 @@ func (h *Desc) Close() error {
 	return h.file.Close()
 }
 
-func (h *Desc) fd() int {
-	return int(h.file.Fd())
+func (h *Desc) Fd() int {
+	return h.fd
 }
 
 // Must is a helper that wraps a call to a function returning (*Desc, error).
@@ -88,7 +89,7 @@ func Handle(conn net.Conn, event Event) (*Desc, error) {
 	//
 	// See https://golang.org/pkg/net/#TCPConn.File
 	// See /usr/local/go/src/net/net.go: conn.File()
-	if err = setNonblock(desc.fd(), true); err != nil {
+	if err = setNonblock(desc.Fd(), true); err != nil {
 		return nil, os.NewSyscallError("setnonblock", err)
 	}
 
@@ -106,14 +107,30 @@ func handle(x interface{}, event Event) (*Desc, error) {
 		return nil, ErrNotFiler
 	}
 
-	// Get a copy of fd.
 	file, err := f.File()
 	if err != nil {
 		return nil, err
 	}
 
+	// Extract fd using SyscallConn - never calls file.Fd()
+	var fd int
+	rawConn, err := file.SyscallConn()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+
+	err = rawConn.Control(func(fdPtr uintptr) {
+		fd = int(fdPtr)
+	})
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+
 	return &Desc{
 		file:  file,
+		fd:    fd,
 		event: event,
 	}, nil
 }
